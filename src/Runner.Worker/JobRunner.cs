@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using System.Net.Http;
 using GitHub.Runner.Common;
 using GitHub.Runner.Sdk;
+using GitHub.DistributedTask.Pipelines.ContextData;
 
 namespace GitHub.Runner.Worker
 {
@@ -63,6 +64,16 @@ namespace GitHub.Runner.Worker
                 jobContext.InitializeJob(message, jobRequestCancellationToken);
                 Trace.Info("Starting the job execution context.");
                 jobContext.Start();
+                var githubContext = jobContext.ExpressionValues["github"] as GitHubContext;
+
+                if (!JobPassesSecurityRestrictions(jobContext))
+                {
+                    var configurationStore = HostContext.GetService<IConfigurationStore>();
+                    RunnerSettings settings = configurationStore.GetSettings();
+                    jobContext.Error($"Running job on worker {settings.AgentName} disallowed by security policy");
+                    return await CompleteJobAsync(jobServer, jobContext, message, TaskResult.Failed);
+                }
+
                 jobContext.Debug($"Starting: {message.JobDisplayName}");
 
                 runnerShutdownRegistration = HostContext.RunnerShutdownToken.Register(() =>
@@ -186,6 +197,85 @@ namespace GitHub.Runner.Worker
                 }
 
                 await ShutdownQueue(throwOnFailure: false);
+            }
+        }
+
+        private bool JobPassesSecurityRestrictions(IExecutionContext jobContext)
+        {
+            var gitHubContext = jobContext.ExpressionValues["github"] as GitHubContext;
+
+            try {
+              if (gitHubContext.IsPullRequest())
+              {
+                  return OkayToRunPullRequest(gitHubContext);
+              }
+
+              return true;
+            }
+            catch (Exception ex)
+            {
+                Trace.Error("Caught exception in JobPassesSecurityRestrictions");
+                Trace.Error("As a safety precaution we are not allowing this job to run");
+                Trace.Error(ex);
+                return false;
+            }
+        }
+
+        private bool OkayToRunPullRequest(GitHubContext gitHubContext)
+        {
+            var configStore = HostContext.GetService<IConfigurationStore>();
+            var settings = configStore.GetSettings();
+            var prSecuritySettings = settings.PullRequestSecuritySettings;
+
+            if (prSecuritySettings is null) {
+                Trace.Info("No pullRequestSecurity defined in settings, allowing this build");
+                return true;
+            }
+
+            var githubEvent = gitHubContext["event"] as DictionaryContextData;
+            var prData = githubEvent["pull_request"] as DictionaryContextData;
+
+            var authorAssociation = prData.TryGetValue("author_association", out var value)
+              ? value as StringContextData : null;
+
+
+            // TODO: Allow COLLABORATOR, MEMBER too -- possibly by a config setting
+            if (authorAssociation == "OWNER")
+            {
+                Trace.Info("PR is opened by a repo owner, always allowed");
+                return true;
+            }
+            else if (prSecuritySettings.AllowContributors && authorAssociation == "COLLABORATOR") {
+                Trace.Info("PR is from the repo collaborator, allowing");
+                return true;
+            }
+
+            // pull_request.user.login is the user who opened the PR. Always fixed
+            // Actor is the user who performed the push. These two can be
+            // different when someone else pushes, and it's the actor who we
+            // need to trust -- for instance if a repo owner force-pushes a PR,
+            // it's because they have made modifications
+            var actor = gitHubContext.TryGetValue("actor", out value)
+              ? value as StringContextData : null;
+
+            Trace.Info($"GitHub PR actor is {actor as StringContextData}");
+
+            if (actor == null)
+            {
+                Trace.Info("Unable to get PR actor, not allowing PR to run");
+                return false;
+            }
+
+            if (prSecuritySettings.AllowedAuthors.Contains(actor))
+            {
+                Trace.Info("Author in PR allowed list");
+                return true;
+            }
+            else
+            {
+                Trace.Info($"Not running job as actor ({actor}) is not in {{{string.Join(", ", prSecuritySettings.AllowedAuthors)}}}");
+
+                return false;
             }
         }
 
