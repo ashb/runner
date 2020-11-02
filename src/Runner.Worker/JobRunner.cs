@@ -7,6 +7,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using GitHub.DistributedTask.Pipelines;
+using GitHub.DistributedTask.Pipelines.ContextData;
 using GitHub.DistributedTask.WebApi;
 using GitHub.Runner.Common;
 using GitHub.Runner.Common.Util;
