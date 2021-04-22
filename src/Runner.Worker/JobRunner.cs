@@ -66,8 +66,6 @@ namespace GitHub.Runner.Worker
                 jobContext.InitializeJob(message, jobRequestCancellationToken);
                 Trace.Info("Starting the job execution context.");
                 jobContext.Start();
-                var githubContext = jobContext.ExpressionValues["github"] as GitHubContext;
-
                 if (!JobPassesSecurityRestrictions(jobContext))
                 {
                     var configurationStore = HostContext.GetService<IConfigurationStore>();
@@ -267,29 +265,37 @@ namespace GitHub.Runner.Worker
             }
 
             // pull_request.user.login is the user who opened the PR. Always fixed
-            // Actor is the user who performed the push. These two can be
-            // different when someone else pushes, and it's the actor who we
-            // need to trust -- for instance if a repo owner force-pushes a PR,
-            // it's because they have made modifications
-            var actor = gitHubContext.TryGetValue("actor", out value)
+            // Actor is the user who performed the push/open/close. For
+            // predictability we validate based on the PR opener, so we don't
+            // get surprised when re-opening an issue causes it to run on
+            // self-hosted runners.
+            var prUser = prData["user"] as DictionaryContextData;
+
+            if (prUser == null)
+            {
+                Trace.Info("Unable to get PR user, not allowing PR to run");
+                return false;
+            }
+
+            var login = prUser.TryGetValue("login", out value)
               ? value as StringContextData : null;
 
-            Trace.Info($"GitHub PR actor is {actor as StringContextData}");
+            Trace.Info($"GitHub PR.user.login is {login as StringContextData}");
 
-            if (actor == null)
+            if (login == null)
             {
                 Trace.Info("Unable to get PR actor, not allowing PR to run");
                 return false;
             }
 
-            if (prSecuritySettings.AllowedAuthors.Contains(actor))
+            if (prSecuritySettings.AllowedAuthors.Contains(login))
             {
                 Trace.Info("Author in PR allowed list");
                 return true;
             }
             else
             {
-                Trace.Info($"Not running job as actor ({actor}) is not in {{{string.Join(", ", prSecuritySettings.AllowedAuthors)}}}");
+                Trace.Info($"Not running job as user ({login}) is not in {{{string.Join(", ", prSecuritySettings.AllowedAuthors)}}}");
 
                 return false;
             }
